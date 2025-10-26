@@ -1,14 +1,155 @@
-<repositories>
-  <repository>
-    <id>jboss-public-repository-group</id>
-    <name>JBoss Public Repository Group</name>
-    <url>https://repository.jboss.org/nexus/content/groups/public/</url>
-  </repository>
-</repositories>
+<dependency>
+        <groupId>org.jbpm</groupId>
+        <artifactId>jbpm-flow-builder</artifactId>
+        <version>8.44.0</version>
+    </dependency>
 
-<pluginRepositories>
-  <pluginRepository>
-    <id>jboss-public-repository-group</id>
-    <url>https://repository.jboss.org/nexus/content/groups/public/</url>
-  </pluginRepository>
-</pluginRepositories>
+    <!-- ⚙️ Core KIE and Drools API -->
+    <dependency>
+        <groupId>org.kie</groupId>
+        <artifactId>kie-api</artifactId>
+        <version>8.44.0</version>
+    </dependency>
+
+    <dependency>
+        <groupId>org.kie</groupId>
+        <artifactId>kie-internal</artifactId>
+        <version>8.44.0</version>
+    </dependency>
+
+    <dependency>
+        <groupId>org.drools</groupId>
+        <artifactId>drools-core</artifactId>
+        <version>8.44.0</version>
+    </dependency>
+
+    <dependency>
+        <groupId>org.drools</groupId>
+        <artifactId>drools-compiler</artifactId>
+        <version>8.44.0</version>
+    </dependency>
+
+    <!-- 🧩 DMN Engine -->
+    <dependency>
+        <groupId>org.kie</groupId>
+        <artifactId>kie-dmn-api</artifactId>
+        <version>8.44.0</version>
+    </dependency>
+
+    <dependency>
+        <groupId>org.kie</groupId>
+        <artifactId>kie-dmn-core</artifactId>
+        <version>8.44.0</version>
+    </dependency>
+
+
+
+    package com.example.validation;
+
+import org.kie.api.KieServices;
+import org.kie.api.builder.*;
+import org.kie.api.io.ResourceType;
+import org.kie.api.runtime.KieContainer;
+import org.kie.api.runtime.KieSession;
+import org.kie.dmn.api.core.DMNRuntime;
+import org.kie.internal.utils.KieHelper;
+import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Mono;
+
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/validate")
+public class ReactiveFileValidationController {
+
+    private static final KieServices KIE_SERVICES = KieServices.Factory.get();
+
+    public record ValidationRequest(String fileType, String fileData) {}
+    public record ValidationResponse(boolean valid, String type, String message) {}
+
+    @PostMapping
+    public Mono<ValidationResponse> validateFile(@RequestBody ValidationRequest req) {
+        return Mono.fromSupplier(() -> {
+            String type = req.fileType() == null ? "UNKNOWN" : req.fileType().trim().toUpperCase();
+            String data = req.fileData();
+
+            if (data == null || data.isBlank()) {
+                return new ValidationResponse(false, type, "File data is empty");
+            }
+
+            try {
+                return switch (type) {
+                    case "BPMN" -> validateBPMN(data);
+                    case "DMN"  -> validateDMN(data);
+                    default     -> new ValidationResponse(false, type, "Unsupported file type: " + type);
+                };
+            } catch (Exception e) {
+                return new ValidationResponse(false, type, "Validation failed: " + e.getMessage());
+            }
+        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()); 
+        // ⬆️ moves validation off the main event loop (non-blocking)
+    }
+
+    private ValidationResponse validateBPMN(String content) {
+        KieHelper helper = new KieHelper();
+        try {
+            helper.addContent(content, ResourceType.BPMN2);
+            Results results = helper.verify();
+
+            if (results.hasMessages(Message.Level.ERROR)) {
+                return new ValidationResponse(false, "BPMN", collectMessages(results));
+            }
+            return new ValidationResponse(true, "BPMN", "Valid BPMN: No validation errors.");
+        } catch (Exception e) {
+            return new ValidationResponse(false, "BPMN", "Invalid BPMN: " + e.getMessage());
+        }
+    }
+
+    private ValidationResponse validateDMN(String content) {
+        KieFileSystem kfs = KIE_SERVICES.newKieFileSystem();
+        KieSession session = null;
+        try {
+            kfs.write("src/main/resources/temp.dmn",
+                    KIE_SERVICES.getResources()
+                            .newByteArrayResource(content.getBytes(StandardCharsets.UTF_8))
+                            .setResourceType(ResourceType.DMN));
+
+            KieBuilder builder = KIE_SERVICES.newKieBuilder(kfs).buildAll();
+            Results results = builder.getResults();
+
+            if (results.hasMessages(Message.Level.ERROR)) {
+                return new ValidationResponse(false, "DMN", collectMessages(results));
+            }
+
+            KieContainer container = KIE_SERVICES.newKieContainer(
+                    KIE_SERVICES.getRepository().getDefaultReleaseId());
+
+            session = container.newKieSession();
+            DMNRuntime runtime = session.getKieRuntime(DMNRuntime.class);
+
+            if (runtime.getModels().isEmpty()) {
+                return new ValidationResponse(false, "DMN", "No DMN models found in file.");
+            }
+
+            return new ValidationResponse(true, "DMN", "Valid DMN: No validation errors.");
+        } catch (Exception e) {
+            return new ValidationResponse(false, "DMN", "Invalid DMN: " + e.getMessage());
+        } finally {
+            if (session != null) {
+                try { session.dispose(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private String collectMessages(Results results) {
+        StringBuilder sb = new StringBuilder();
+        List<Message> messages = results.getMessages(Message.Level.ERROR);
+        for (Message msg : messages) {
+            sb.append("Line ").append(msg.getLine()).append(": ")
+              .append(msg.getText()).append("\n");
+        }
+        return sb.toString();
+    }
+}
+
