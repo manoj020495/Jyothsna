@@ -1,6 +1,5 @@
-package com.example.validation.service;
+package com.vzw.admin.service;
 
-import com.example.validation.model.ValidationResponse;
 import org.kie.api.KieServices;
 import org.kie.api.builder.*;
 import org.kie.api.io.ResourceType;
@@ -10,37 +9,69 @@ import org.kie.dmn.api.core.DMNRuntime;
 import org.kie.internal.utils.KieHelper;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 
 @Service
-public class FileValidationService {
+public class WorkflowValidationService {
 
     private static final KieServices KIE_SERVICES = KieServices.Factory.get();
+    private static final String WORK_FLOW_INFO_SERVICE = "WORKFLOW_VALIDATION_SERVICE";
 
-    public Mono<ValidationResponse> validate(String fileType, String fileData) {
-        return Mono.fromSupplier(() -> {
-            String type = (fileType == null) ? "UNKNOWN" : fileType.trim().toUpperCase();
+    public Mono<ValidationResponse> validateFile(
+            ValidationRequest request,
+            Map<String, Object> logMap,
+            Long requestStartTime) {
 
-            if (fileData == null || fileData.isBlank()) {
-                return new ValidationResponse(false, type, "File data is empty");
-            }
+        // log: request received
+        logMap.put("REQUEST_MESSAGE",
+                WORK_FLOW_INFO_SERVICE + ": Received validation request");
+        CommonUtil.logToSplunk(WORK_FLOW_INFO_SERVICE, requestStartTime, logMap, SplunkLogger.info());
 
-            try {
-                return switch (type) {
-                    case "BPMN" -> validateBPMN(fileData);
-                    case "DMN"  -> validateDMN(fileData);
-                    default     -> new ValidationResponse(false, type, "Unsupported file type: " + type);
-                };
-            } catch (Exception e) {
-                return new ValidationResponse(false, type, "Validation failed: " + e.getMessage());
-            }
-        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
-        // Offload to boundedElastic (non-blocking)
+        return Mono.just(request)
+                // Step 1: call the blocking KIE validation off the event loop
+                .publishOn(Schedulers.boundedElastic())
+                .map(this::performValidation)
+                // Step 2: log on success
+                .doOnNext(resp -> {
+                    logMap.put("RESPONSE_MESSAGE",
+                            WORK_FLOW_INFO_SERVICE + ": Validation completed for " + resp.getType());
+                    CommonUtil.logToSplunk(WORK_FLOW_INFO_SERVICE, requestStartTime, logMap, SplunkLogger.info());
+                })
+                // Step 3: log on error
+                .doOnError(error -> {
+                    logMap.put("ERROR_MESSAGE",
+                            WORK_FLOW_INFO_SERVICE + ": Validation failed → " + error.getMessage());
+                    CommonUtil.logErrorToSplunk(WORK_FLOW_INFO_SERVICE, "", requestStartTime,
+                            logMap, SplunkLogger.error());
+                })
+                // Step 4: recover gracefully if validation threw exception
+                .onErrorResume(ex ->
+                        Mono.just(new ValidationResponse(false, "UNKNOWN",
+                                "Unexpected error: " + ex.getMessage())));
     }
 
-    /** ✅ BPMN validation — lightweight & in-memory */
+    // ------------------ internal methods ------------------
+
+    private ValidationResponse performValidation(ValidationRequest req) {
+        String fileType = req.getFileType() == null ? "UNKNOWN" : req.getFileType().trim().toUpperCase();
+        String data = req.getFileData();
+
+        if (data == null || data.isBlank()) {
+            return new ValidationResponse(false, fileType, "File content is empty");
+        }
+
+        return switch (fileType) {
+            case "BPMN" -> validateBPMN(data);
+            case "DMN"  -> validateDMN(data);
+            default     -> new ValidationResponse(false, fileType,
+                                "Unsupported file type: " + fileType);
+        };
+    }
+
     private ValidationResponse validateBPMN(String content) {
         KieHelper helper = new KieHelper();
         try {
@@ -56,7 +87,6 @@ public class FileValidationService {
         }
     }
 
-    /** ✅ DMN validation — safely builds temporary container & disposes session */
     private ValidationResponse validateDMN(String content) {
         KieFileSystem kfs = KIE_SERVICES.newKieFileSystem();
         KieSession session = null;
@@ -98,32 +128,9 @@ public class FileValidationService {
         StringBuilder sb = new StringBuilder();
         List<Message> messages = results.getMessages(Message.Level.ERROR);
         for (Message msg : messages) {
-            sb.append("Line ").append(msg.getLine()).append(": ")
-              .append(msg.getText()).append("\n");
+            sb.append("Line ").append(msg.getLine())
+              .append(": ").append(msg.getText()).append("\n");
         }
         return sb.toString();
-    }
-}
-package com.example.validation.controller;
-
-import com.example.validation.model.ValidationRequest;
-import com.example.validation.model.ValidationResponse;
-import com.example.validation.service.FileValidationService;
-import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Mono;
-
-@RestController
-@RequestMapping("/api/validate")
-public class FileValidationController {
-
-    private final FileValidationService validationService;
-
-    public FileValidationController(FileValidationService validationService) {
-        this.validationService = validationService;
-    }
-
-    @PostMapping
-    public Mono<ValidationResponse> validateFile(@RequestBody ValidationRequest req) {
-        return validationService.validate(req.fileType(), req.fileData());
     }
 }
