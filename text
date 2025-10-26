@@ -1,51 +1,6 @@
-<dependency>
-        <groupId>org.jbpm</groupId>
-        <artifactId>jbpm-flow-builder</artifactId>
-        <version>8.44.0</version>
-    </dependency>
+package com.example.validation.service;
 
-    <!-- ⚙️ Core KIE and Drools API -->
-    <dependency>
-        <groupId>org.kie</groupId>
-        <artifactId>kie-api</artifactId>
-        <version>8.44.0</version>
-    </dependency>
-
-    <dependency>
-        <groupId>org.kie</groupId>
-        <artifactId>kie-internal</artifactId>
-        <version>8.44.0</version>
-    </dependency>
-
-    <dependency>
-        <groupId>org.drools</groupId>
-        <artifactId>drools-core</artifactId>
-        <version>8.44.0</version>
-    </dependency>
-
-    <dependency>
-        <groupId>org.drools</groupId>
-        <artifactId>drools-compiler</artifactId>
-        <version>8.44.0</version>
-    </dependency>
-
-    <!-- 🧩 DMN Engine -->
-    <dependency>
-        <groupId>org.kie</groupId>
-        <artifactId>kie-dmn-api</artifactId>
-        <version>8.44.0</version>
-    </dependency>
-
-    <dependency>
-        <groupId>org.kie</groupId>
-        <artifactId>kie-dmn-core</artifactId>
-        <version>8.44.0</version>
-    </dependency>
-
-
-
-    package com.example.validation;
-
+import com.example.validation.model.ValidationResponse;
 import org.kie.api.KieServices;
 import org.kie.api.builder.*;
 import org.kie.api.io.ResourceType;
@@ -53,44 +8,39 @@ import org.kie.api.runtime.KieContainer;
 import org.kie.api.runtime.KieSession;
 import org.kie.dmn.api.core.DMNRuntime;
 import org.kie.internal.utils.KieHelper;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
-@RestController
-@RequestMapping("/api/validate")
-public class ReactiveFileValidationController {
+@Service
+public class FileValidationService {
 
     private static final KieServices KIE_SERVICES = KieServices.Factory.get();
 
-    public record ValidationRequest(String fileType, String fileData) {}
-    public record ValidationResponse(boolean valid, String type, String message) {}
-
-    @PostMapping
-    public Mono<ValidationResponse> validateFile(@RequestBody ValidationRequest req) {
+    public Mono<ValidationResponse> validate(String fileType, String fileData) {
         return Mono.fromSupplier(() -> {
-            String type = req.fileType() == null ? "UNKNOWN" : req.fileType().trim().toUpperCase();
-            String data = req.fileData();
+            String type = (fileType == null) ? "UNKNOWN" : fileType.trim().toUpperCase();
 
-            if (data == null || data.isBlank()) {
+            if (fileData == null || fileData.isBlank()) {
                 return new ValidationResponse(false, type, "File data is empty");
             }
 
             try {
                 return switch (type) {
-                    case "BPMN" -> validateBPMN(data);
-                    case "DMN"  -> validateDMN(data);
+                    case "BPMN" -> validateBPMN(fileData);
+                    case "DMN"  -> validateDMN(fileData);
                     default     -> new ValidationResponse(false, type, "Unsupported file type: " + type);
                 };
             } catch (Exception e) {
                 return new ValidationResponse(false, type, "Validation failed: " + e.getMessage());
             }
-        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()); 
-        // ⬆️ moves validation off the main event loop (non-blocking)
+        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+        // Offload to boundedElastic (non-blocking)
     }
 
+    /** ✅ BPMN validation — lightweight & in-memory */
     private ValidationResponse validateBPMN(String content) {
         KieHelper helper = new KieHelper();
         try {
@@ -106,9 +56,11 @@ public class ReactiveFileValidationController {
         }
     }
 
+    /** ✅ DMN validation — safely builds temporary container & disposes session */
     private ValidationResponse validateDMN(String content) {
         KieFileSystem kfs = KIE_SERVICES.newKieFileSystem();
         KieSession session = null;
+
         try {
             kfs.write("src/main/resources/temp.dmn",
                     KIE_SERVICES.getResources()
@@ -152,4 +104,26 @@ public class ReactiveFileValidationController {
         return sb.toString();
     }
 }
+package com.example.validation.controller;
 
+import com.example.validation.model.ValidationRequest;
+import com.example.validation.model.ValidationResponse;
+import com.example.validation.service.FileValidationService;
+import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Mono;
+
+@RestController
+@RequestMapping("/api/validate")
+public class FileValidationController {
+
+    private final FileValidationService validationService;
+
+    public FileValidationController(FileValidationService validationService) {
+        this.validationService = validationService;
+    }
+
+    @PostMapping
+    public Mono<ValidationResponse> validateFile(@RequestBody ValidationRequest req) {
+        return validationService.validate(req.fileType(), req.fileData());
+    }
+}
