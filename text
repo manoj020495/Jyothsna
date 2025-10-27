@@ -1,16 +1,24 @@
-import org.jbpm.bpmn2.xml.BPMN2ProcessFactory;
-import org.drools.io.impl.ByteArrayResource;
-import org.kie.api.io.Resource;
+@PostMapping(value = "/validateWorkFlow", produces = "application/json")
+public Mono<ValidationResponse> validateFile(@Valid @RequestBody ValidationRequest req) {
 
-private ValidationResponse validateBPMN(String content) {
-    try {
-        Resource resource = new ByteArrayResource(content.getBytes(StandardCharsets.UTF_8));
-        BPMN2ProcessFactory factory = new BPMN2ProcessFactory();
-        factory.addProcessFromXml(resource); // parse directly
+    Long requestStartTime = System.nanoTime();
+    Map<String, Object> logMap = new HashMap<>();
+    logMap.put(TYPE_ALIAS, JBPM_VALIDATION_CONTROLLER);
 
-        return new ValidationResponse(true, "BPMN", "Valid BPMN: no syntax errors");
-    } catch (Exception e) {
-        return new ValidationResponse(false, "BPMN",
-                "Invalid BPMN: " + e.getMessage());
-    }
+    String requestMessage = JBPM_VALIDATION_CONTROLLER + " : Validation request for fileType=" + req.getFileType();
+    logMap.put(REQUEST_MESSAGE, requestMessage);
+    CommonUtil.logToSplunk(JBPM_VALIDATION_CONTROLLER, requestStartTime, logMap, splunkLogger);
+
+    return Mono.just(req)
+            .flatMap(request -> workflowValidationService.validateFile(request, logMap, requestStartTime))
+            .doOnNext(response -> {
+                String responseMessage = JBPM_VALIDATION_CONTROLLER + " : Validation completed successfully for type=" + req.getFileType();
+                logMap.put(RESPONSE_MESSAGE, responseMessage);
+                CommonUtil.logToSplunk(JBPM_VALIDATION_CONTROLLER, requestStartTime, logMap, splunkLogger);
+            })
+            .doOnError(error -> {
+                String errorMessage = JBPM_VALIDATION_CONTROLLER + " : Validation failed for type=" + req.getFileType() + " | Error: " + error.getMessage();
+                logMap.put(ERROR_MESSAGE, errorMessage);
+                CommonUtil.logErrorToSplunk(JBPM_VALIDATION_CONTROLLER, "", requestStartTime, logMap, splunkLogger);
+            });
 }
