@@ -1,136 +1,16 @@
-package com.vzw.admin.service;
+import org.jbpm.bpmn2.xml.BPMN2ProcessFactory;
+import org.drools.io.impl.ByteArrayResource;
+import org.kie.api.io.Resource;
 
-import org.kie.api.KieServices;
-import org.kie.api.builder.*;
-import org.kie.api.io.ResourceType;
-import org.kie.api.runtime.KieContainer;
-import org.kie.api.runtime.KieSession;
-import org.kie.dmn.api.core.DMNRuntime;
-import org.kie.internal.utils.KieHelper;
-import org.springframework.stereotype.Service;
-import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
+private ValidationResponse validateBPMN(String content) {
+    try {
+        Resource resource = new ByteArrayResource(content.getBytes(StandardCharsets.UTF_8));
+        BPMN2ProcessFactory factory = new BPMN2ProcessFactory();
+        factory.addProcessFromXml(resource); // parse directly
 
-import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.Map;
-
-@Service
-public class WorkflowValidationService {
-
-    private static final KieServices KIE_SERVICES = KieServices.Factory.get();
-    private static final String WORK_FLOW_INFO_SERVICE = "WORKFLOW_VALIDATION_SERVICE";
-
-    public Mono<ValidationResponse> validateFile(
-            ValidationRequest request,
-            Map<String, Object> logMap,
-            Long requestStartTime) {
-
-        // log: request received
-        logMap.put("REQUEST_MESSAGE",
-                WORK_FLOW_INFO_SERVICE + ": Received validation request");
-        CommonUtil.logToSplunk(WORK_FLOW_INFO_SERVICE, requestStartTime, logMap, SplunkLogger.info());
-
-        return Mono.just(request)
-                // Step 1: call the blocking KIE validation off the event loop
-                .publishOn(Schedulers.boundedElastic())
-                .map(this::performValidation)
-                // Step 2: log on success
-                .doOnNext(resp -> {
-                    logMap.put("RESPONSE_MESSAGE",
-                            WORK_FLOW_INFO_SERVICE + ": Validation completed for " + resp.getType());
-                    CommonUtil.logToSplunk(WORK_FLOW_INFO_SERVICE, requestStartTime, logMap, SplunkLogger.info());
-                })
-                // Step 3: log on error
-                .doOnError(error -> {
-                    logMap.put("ERROR_MESSAGE",
-                            WORK_FLOW_INFO_SERVICE + ": Validation failed → " + error.getMessage());
-                    CommonUtil.logErrorToSplunk(WORK_FLOW_INFO_SERVICE, "", requestStartTime,
-                            logMap, SplunkLogger.error());
-                })
-                // Step 4: recover gracefully if validation threw exception
-                .onErrorResume(ex ->
-                        Mono.just(new ValidationResponse(false, "UNKNOWN",
-                                "Unexpected error: " + ex.getMessage())));
-    }
-
-    // ------------------ internal methods ------------------
-
-    private ValidationResponse performValidation(ValidationRequest req) {
-        String fileType = req.getFileType() == null ? "UNKNOWN" : req.getFileType().trim().toUpperCase();
-        String data = req.getFileData();
-
-        if (data == null || data.isBlank()) {
-            return new ValidationResponse(false, fileType, "File content is empty");
-        }
-
-        return switch (fileType) {
-            case "BPMN" -> validateBPMN(data);
-            case "DMN"  -> validateDMN(data);
-            default     -> new ValidationResponse(false, fileType,
-                                "Unsupported file type: " + fileType);
-        };
-    }
-
-    private ValidationResponse validateBPMN(String content) {
-        KieHelper helper = new KieHelper();
-        try {
-            helper.addContent(content, ResourceType.BPMN2);
-            Results results = helper.verify();
-
-            if (results.hasMessages(Message.Level.ERROR)) {
-                return new ValidationResponse(false, "BPMN", collectMessages(results));
-            }
-            return new ValidationResponse(true, "BPMN", "Valid BPMN: No validation errors.");
-        } catch (Exception e) {
-            return new ValidationResponse(false, "BPMN", "Invalid BPMN: " + e.getMessage());
-        }
-    }
-
-    private ValidationResponse validateDMN(String content) {
-        KieFileSystem kfs = KIE_SERVICES.newKieFileSystem();
-        KieSession session = null;
-
-        try {
-            kfs.write("src/main/resources/temp.dmn",
-                    KIE_SERVICES.getResources()
-                            .newByteArrayResource(content.getBytes(StandardCharsets.UTF_8))
-                            .setResourceType(ResourceType.DMN));
-
-            KieBuilder builder = KIE_SERVICES.newKieBuilder(kfs).buildAll();
-            Results results = builder.getResults();
-
-            if (results.hasMessages(Message.Level.ERROR)) {
-                return new ValidationResponse(false, "DMN", collectMessages(results));
-            }
-
-            KieContainer container = KIE_SERVICES.newKieContainer(
-                    KIE_SERVICES.getRepository().getDefaultReleaseId());
-
-            session = container.newKieSession();
-            DMNRuntime runtime = session.getKieRuntime(DMNRuntime.class);
-
-            if (runtime.getModels().isEmpty()) {
-                return new ValidationResponse(false, "DMN", "No DMN models found in file.");
-            }
-
-            return new ValidationResponse(true, "DMN", "Valid DMN: No validation errors.");
-        } catch (Exception e) {
-            return new ValidationResponse(false, "DMN", "Invalid DMN: " + e.getMessage());
-        } finally {
-            if (session != null) {
-                try { session.dispose(); } catch (Exception ignored) {}
-            }
-        }
-    }
-
-    private String collectMessages(Results results) {
-        StringBuilder sb = new StringBuilder();
-        List<Message> messages = results.getMessages(Message.Level.ERROR);
-        for (Message msg : messages) {
-            sb.append("Line ").append(msg.getLine())
-              .append(": ").append(msg.getText()).append("\n");
-        }
-        return sb.toString();
+        return new ValidationResponse(true, "BPMN", "Valid BPMN: no syntax errors");
+    } catch (Exception e) {
+        return new ValidationResponse(false, "BPMN",
+                "Invalid BPMN: " + e.getMessage());
     }
 }
