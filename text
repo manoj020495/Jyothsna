@@ -1,24 +1,38 @@
-@PostMapping(value = "/validateWorkFlow", produces = "application/json")
-public Mono<ValidationResponse> validateFile(@Valid @RequestBody ValidationRequest req) {
+private ValidationResponse validateDMN(String content,
+                                       Map<String, Object> logMap,
+                                       Long requestStartTime) {
+    final String method = "validateDMN";
+    logMap.put(REQUEST_MESSAGE, JBPMVALIDATION_SERVICE + " : Start of " + method);
+    CommonUtil.logToSplunk(JBPMVALIDATION_SERVICE, requestStartTime, logMap, splunkLogger);
 
-    Long requestStartTime = System.nanoTime();
-    Map<String, Object> logMap = new HashMap<>();
-    logMap.put(TYPE_ALIAS, JBPM_VALIDATION_CONTROLLER);
+    try {
+        // Build and verify without deploying
+        KieFileSystem kfs = KIE_SERVICES.newKieFileSystem();
+        Resource dmnResource = KIE_SERVICES.getResources()
+                .newByteArrayResource(content.getBytes(StandardCharsets.UTF_8))
+                .setSourcePath("temp.dmn")
+                .setResourceType(ResourceType.DMN);
+        kfs.write(dmnResource);
 
-    String requestMessage = JBPM_VALIDATION_CONTROLLER + " : Validation request for fileType=" + req.getFileType();
-    logMap.put(REQUEST_MESSAGE, requestMessage);
-    CommonUtil.logToSplunk(JBPM_VALIDATION_CONTROLLER, requestStartTime, logMap, splunkLogger);
+        KieBuilder builder = KIE_SERVICES.newKieBuilder(kfs).buildAll();
+        Results results = builder.getResults();
 
-    return Mono.just(req)
-            .flatMap(request -> workflowValidationService.validateFile(request, logMap, requestStartTime))
-            .doOnNext(response -> {
-                String responseMessage = JBPM_VALIDATION_CONTROLLER + " : Validation completed successfully for type=" + req.getFileType();
-                logMap.put(RESPONSE_MESSAGE, responseMessage);
-                CommonUtil.logToSplunk(JBPM_VALIDATION_CONTROLLER, requestStartTime, logMap, splunkLogger);
-            })
-            .doOnError(error -> {
-                String errorMessage = JBPM_VALIDATION_CONTROLLER + " : Validation failed for type=" + req.getFileType() + " | Error: " + error.getMessage();
-                logMap.put(ERROR_MESSAGE, errorMessage);
-                CommonUtil.logErrorToSplunk(JBPM_VALIDATION_CONTROLLER, "", requestStartTime, logMap, splunkLogger);
-            });
+        if (results.hasMessages(Message.Level.ERROR)) {
+            String errorMsg = collectMessages(results);
+            logMap.put(ERROR_MESSAGE, JBPMVALIDATION_SERVICE + " : DMN verification failed. " + errorMsg);
+            CommonUtil.logErrorToSplunk(JBPMVALIDATION_SERVICE, "", requestStartTime, logMap, splunkLogger);
+            return new ValidationResponse(false, "DMN", "Invalid DMN: " + errorMsg);
+        }
+
+        // ✅ Successfully validated — no container creation
+        logMap.put(RESPONSE_MESSAGE, JBPMVALIDATION_SERVICE + " : DMN validation successful.");
+        CommonUtil.logToSplunk(JBPMVALIDATION_SERVICE, requestStartTime, logMap, splunkLogger);
+        return new ValidationResponse(true, "DMN", "Valid DMN: no syntax or build errors.");
+
+    } catch (Exception e) {
+        String errorMsg = "Exception during DMN validation: " + e.getMessage();
+        logMap.put(ERROR_MESSAGE, JBPMVALIDATION_SERVICE + " : " + errorMsg);
+        CommonUtil.logErrorToSplunk(JBPMVALIDATION_SERVICE, "", requestStartTime, logMap, splunkLogger);
+        return new ValidationResponse(false, "DMN", errorMsg);
+    }
 }
