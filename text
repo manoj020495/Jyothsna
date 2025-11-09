@@ -7,72 +7,103 @@ import java.io.File;
 import java.util.*;
 import java.util.stream.Collectors;
 
-public class CamundaVsJbpmRuleComparator {
+public class DmnRuleDetailedComparator {
 
-    public static void main(String[] args) throws Exception {
-
-        // ✅ Update your file paths
-        String camundaFile = "src/main/resources/2FA_AA_RULES_ASYNCSMS_BAU.dmn"; // Camunda main
-        String jbpmFile = "src/main/resources/2FA_AA_RULES_ASYNCSMS.dmn";        // jBPM to verify
-
-        List<String> camundaRules = extractRules(camundaFile);
-        List<String> jbpmRules = extractRules(jbpmFile);
-
-        Set<String> camundaSet = new LinkedHashSet<>(camundaRules);
-        Set<String> jbpmSet = new LinkedHashSet<>(jbpmRules);
-
-        // ✅ Find rules missing in jBPM
-        Set<String> missingInJbpm = new LinkedHashSet<>(camundaSet);
-        missingInJbpm.removeAll(jbpmSet);
-
-        System.out.println("=== ✅ Total Camunda Rules: " + camundaSet.size());
-        System.out.println("=== 🟡 Total jBPM Rules: " + jbpmSet.size());
-        System.out.println("=== 🔻 Missing in jBPM DMN ===");
-
-        if (missingInJbpm.isEmpty()) {
-            System.out.println("All rules are present in jBPM ✅");
-        } else {
-            missingInJbpm.forEach(System.out::println);
+    static class RuleInfo {
+        String id;
+        int index;
+        String signature;
+        public RuleInfo(String id, int index, String signature) {
+            this.id = id;
+            this.index = index;
+            this.signature = signature;
         }
     }
 
-    // --- Extract <rule> entries from DMN ---
-    private static List<String> extractRules(String filePath) throws Exception {
+    public static void main(String[] args) throws Exception {
+
+        String camundaFile = "src/main/resources/2FA_AA_RULES_ASYNCSMS_BAU.dmn"; // Camunda main
+        String jbpmFile = "src/main/resources/2FA_AA_RULES_ASYNCSMS.dmn";        // jBPM target
+
+        List<RuleInfo> camundaRules = extractRules(camundaFile);
+        List<RuleInfo> jbpmRules = extractRules(jbpmFile);
+
+        Map<String, RuleInfo> camundaMap = camundaRules.stream()
+                .collect(Collectors.toMap(r -> r.signature, r -> r));
+        Map<String, RuleInfo> jbpmMap = jbpmRules.stream()
+                .collect(Collectors.toMap(r -> r.signature, r -> r));
+
+        // Missing in jBPM (present in Camunda but not in jBPM)
+        Set<String> missingSignatures = new LinkedHashSet<>(camundaMap.keySet());
+        missingSignatures.removeAll(jbpmMap.keySet());
+
+        // Extra in jBPM (present in jBPM but not in Camunda)
+        Set<String> extraSignatures = new LinkedHashSet<>(jbpmMap.keySet());
+        extraSignatures.removeAll(camundaMap.keySet());
+
+        System.out.println("=== ✅ Total Camunda Rules: " + camundaRules.size());
+        System.out.println("=== 🟡 Total jBPM Rules: " + jbpmRules.size());
+        System.out.println("======================================\n");
+
+        // Print missing rules
+        System.out.println("🔻 Missing in jBPM (exist in Camunda but not in jBPM)");
+        if (missingSignatures.isEmpty()) {
+            System.out.println("None ✅");
+        } else {
+            for (String sig : missingSignatures) {
+                RuleInfo r = camundaMap.get(sig);
+                System.out.printf("Camunda Rule #%d (id=%s): %s%n", r.index, r.id, r.signature);
+            }
+        }
+
+        System.out.println("\n🔺 Extra in jBPM (exist in jBPM but not in Camunda)");
+        if (extraSignatures.isEmpty()) {
+            System.out.println("None ✅");
+        } else {
+            for (String sig : extraSignatures) {
+                RuleInfo r = jbpmMap.get(sig);
+                System.out.printf("jBPM Rule #%d (id=%s): %s%n", r.index, r.id, r.signature);
+            }
+        }
+    }
+
+    // --- Extract all rules with id + index + signature ---
+    private static List<RuleInfo> extractRules(String filePath) throws Exception {
         DocumentBuilderFactory dbFactory = DocumentBuilderFactory.newInstance();
         dbFactory.setNamespaceAware(true);
         DocumentBuilder dBuilder = dbFactory.newDocumentBuilder();
         Document doc = dBuilder.parse(new File(filePath));
         doc.getDocumentElement().normalize();
 
-        List<String> rules = new ArrayList<>();
-
+        List<RuleInfo> rules = new ArrayList<>();
         NodeList ruleNodes = doc.getElementsByTagNameNS("*", "rule");
+
         for (int i = 0; i < ruleNodes.getLength(); i++) {
             Element rule = (Element) ruleNodes.item(i);
+            String id = rule.getAttribute("id");
+            if (id == null || id.isBlank()) {
+                id = "Rule-" + (i + 1);
+            }
 
-            // --- Input entries ---
             NodeList inputEntries = rule.getElementsByTagNameNS("*", "inputEntry");
             List<String> inputs = new ArrayList<>();
             for (int j = 0; j < inputEntries.getLength(); j++) {
-                Element in = (Element) inputEntries.item(j);
-                inputs.add(extractText(in));
+                inputs.add(extractText((Element) inputEntries.item(j)));
             }
 
-            // --- Output entries ---
             NodeList outputEntries = rule.getElementsByTagNameNS("*", "outputEntry");
             List<String> outputs = new ArrayList<>();
             for (int j = 0; j < outputEntries.getLength(); j++) {
-                Element out = (Element) outputEntries.item(j);
-                outputs.add(extractText(out));
+                outputs.add(extractText((Element) outputEntries.item(j)));
             }
 
-            // --- Build comparable rule signature ---
-            String key = String.join(" | ", inputs) + " => " + String.join(" | ", outputs);
-            key = key.replaceAll("\\s+", " ").trim(); // normalize spaces
-            rules.add(key);
+            String signature = String.join(" | ", inputs) + " => " + String.join(" | ", outputs);
+            signature = signature.replaceAll("\\s+", " ").trim();
+
+            rules.add(new RuleInfo(id, i + 1, signature));
         }
 
-        return rules.stream().distinct().collect(Collectors.toList());
+        return rules;
     }
 
     private static String extractText(Element element) {
