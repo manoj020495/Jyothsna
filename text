@@ -1,38 +1,83 @@
-private ValidationResponse validateDMN(String content,
-                                       Map<String, Object> logMap,
-                                       Long requestStartTime) {
-    final String method = "validateDMN";
-    logMap.put(REQUEST_MESSAGE, JBPMVALIDATION_SERVICE + " : Start of " + method);
-    CommonUtil.logToSplunk(JBPMVALIDATION_SERVICE, requestStartTime, logMap, splunkLogger);
+package com.example.dmncompare;
 
-    try {
-        // Build and verify without deploying
-        KieFileSystem kfs = KIE_SERVICES.newKieFileSystem();
-        Resource dmnResource = KIE_SERVICES.getResources()
-                .newByteArrayResource(content.getBytes(StandardCharsets.UTF_8))
-                .setSourcePath("temp.dmn")
-                .setResourceType(ResourceType.DMN);
-        kfs.write(dmnResource);
+import org.w3c.dom.*;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import java.io.File;
+import java.util.*;
+import java.util.stream.Collectors;
 
-        KieBuilder builder = KIE_SERVICES.newKieBuilder(kfs).buildAll();
-        Results results = builder.getResults();
+public class DmnRuleComparator {
 
-        if (results.hasMessages(Message.Level.ERROR)) {
-            String errorMsg = collectMessages(results);
-            logMap.put(ERROR_MESSAGE, JBPMVALIDATION_SERVICE + " : DMN verification failed. " + errorMsg);
-            CommonUtil.logErrorToSplunk(JBPMVALIDATION_SERVICE, "", requestStartTime, logMap, splunkLogger);
-            return new ValidationResponse(false, "DMN", "Invalid DMN: " + errorMsg);
+    public static void main(String[] args) throws Exception {
+        String camundaFile = "src/main/resources/2FA_AA_RULES_ASYNCSMS_BAU.dmn";
+        String kieFile = "src/main/resources/2FA_AA_RULES_ASYNCSMS.dmn";
+
+        List<String> camundaRules = extractRules(camundaFile);
+        List<String> kieRules = extractRules(kieFile);
+
+        Set<String> camundaSet = new HashSet<>(camundaRules);
+        Set<String> kieSet = new HashSet<>(kieRules);
+
+        Set<String> missingInKie = new LinkedHashSet<>(camundaSet);
+        missingInKie.removeAll(kieSet);
+
+        Set<String> missingInCamunda = new LinkedHashSet<>(kieSet);
+        missingInCamunda.removeAll(camundaSet);
+
+        System.out.println("=== Rules missing in KIE DMN ===");
+        if (missingInKie.isEmpty()) System.out.println("None ✅");
+        else missingInKie.forEach(System.out::println);
+
+        System.out.println("\n=== Rules missing in Camunda DMN ===");
+        if (missingInCamunda.isEmpty()) System.out.println("None ✅");
+        else missingInCamunda.forEach(System.out::println);
+    }
+
+    private static List<String> extractRules(String filePath) throws Exception {
+        DocumentBuilderFactory dbFactory = DocumentBuilderFactory.newInstance();
+        dbFactory.setNamespaceAware(true);
+        DocumentBuilder dBuilder = dbFactory.newDocumentBuilder();
+        Document doc = dBuilder.parse(new File(filePath));
+        doc.getDocumentElement().normalize();
+
+        List<String> rules = new ArrayList<>();
+
+        NodeList ruleNodes = doc.getElementsByTagNameNS("*", "rule");
+        for (int i = 0; i < ruleNodes.getLength(); i++) {
+            Element rule = (Element) ruleNodes.item(i);
+
+            // Extract all input entries
+            NodeList inputEntries = rule.getElementsByTagNameNS("*", "inputEntry");
+            List<String> inputs = new ArrayList<>();
+            for (int j = 0; j < inputEntries.getLength(); j++) {
+                Element in = (Element) inputEntries.item(j);
+                String val = extractText(in);
+                inputs.add(val);
+            }
+
+            // Extract all output entries
+            NodeList outputEntries = rule.getElementsByTagNameNS("*", "outputEntry");
+            List<String> outputs = new ArrayList<>();
+            for (int j = 0; j < outputEntries.getLength(); j++) {
+                Element out = (Element) outputEntries.item(j);
+                String val = extractText(out);
+                outputs.add(val);
+            }
+
+            // Build normalized rule signature
+            String key = String.join(" | ", inputs) + " => " + String.join(" | ", outputs);
+            rules.add(key);
         }
 
-        // ✅ Successfully validated — no container creation
-        logMap.put(RESPONSE_MESSAGE, JBPMVALIDATION_SERVICE + " : DMN validation successful.");
-        CommonUtil.logToSplunk(JBPMVALIDATION_SERVICE, requestStartTime, logMap, splunkLogger);
-        return new ValidationResponse(true, "DMN", "Valid DMN: no syntax or build errors.");
+        return rules.stream().map(String::trim).filter(s -> !s.isBlank()).collect(Collectors.toList());
+    }
 
-    } catch (Exception e) {
-        String errorMsg = "Exception during DMN validation: " + e.getMessage();
-        logMap.put(ERROR_MESSAGE, JBPMVALIDATION_SERVICE + " : " + errorMsg);
-        CommonUtil.logErrorToSplunk(JBPMVALIDATION_SERVICE, "", requestStartTime, logMap, splunkLogger);
-        return new ValidationResponse(false, "DMN", errorMsg);
+    private static String extractText(Element element) {
+        NodeList texts = element.getElementsByTagNameNS("*", "text");
+        if (texts.getLength() > 0) {
+            return texts.item(0).getTextContent().trim();
+        }
+        return "";
     }
 }
