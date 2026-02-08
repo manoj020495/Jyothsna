@@ -1,116 +1,19 @@
-package com.example.dmncompare;
+package com.example.demo;
 
-import org.w3c.dom.*;
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.File;
-import java.util.*;
-import java.util.stream.Collectors;
+import io.camunda.zeebe.client.ZeebeClient;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
-public class DmnRuleDetailedComparator {
+@Configuration
+public class ZeebeConnectionCheck {
 
-    static class RuleInfo {
-        String id;
-        int index;
-        String signature;
-        public RuleInfo(String id, int index, String signature) {
-            this.id = id;
-            this.index = index;
-            this.signature = signature;
-        }
-    }
-
-    public static void main(String[] args) throws Exception {
-
-        String camundaFile = "src/main/resources/2FA_AA_RULES_ASYNCSMS_BAU.dmn"; // Camunda main
-        String jbpmFile = "src/main/resources/2FA_AA_RULES_ASYNCSMS.dmn";        // jBPM target
-
-        List<RuleInfo> camundaRules = extractRules(camundaFile);
-        List<RuleInfo> jbpmRules = extractRules(jbpmFile);
-
-        Map<String, RuleInfo> camundaMap = camundaRules.stream()
-                .collect(Collectors.toMap(r -> r.signature, r -> r));
-        Map<String, RuleInfo> jbpmMap = jbpmRules.stream()
-                .collect(Collectors.toMap(r -> r.signature, r -> r));
-
-        // Missing in jBPM (present in Camunda but not in jBPM)
-        Set<String> missingSignatures = new LinkedHashSet<>(camundaMap.keySet());
-        missingSignatures.removeAll(jbpmMap.keySet());
-
-        // Extra in jBPM (present in jBPM but not in Camunda)
-        Set<String> extraSignatures = new LinkedHashSet<>(jbpmMap.keySet());
-        extraSignatures.removeAll(camundaMap.keySet());
-
-        System.out.println("=== ✅ Total Camunda Rules: " + camundaRules.size());
-        System.out.println("=== 🟡 Total jBPM Rules: " + jbpmRules.size());
-        System.out.println("======================================\n");
-
-        // Print missing rules
-        System.out.println("🔻 Missing in jBPM (exist in Camunda but not in jBPM)");
-        if (missingSignatures.isEmpty()) {
-            System.out.println("None ✅");
-        } else {
-            for (String sig : missingSignatures) {
-                RuleInfo r = camundaMap.get(sig);
-                System.out.printf("Camunda Rule #%d (id=%s): %s%n", r.index, r.id, r.signature);
-            }
-        }
-
-        System.out.println("\n🔺 Extra in jBPM (exist in jBPM but not in Camunda)");
-        if (extraSignatures.isEmpty()) {
-            System.out.println("None ✅");
-        } else {
-            for (String sig : extraSignatures) {
-                RuleInfo r = jbpmMap.get(sig);
-                System.out.printf("jBPM Rule #%d (id=%s): %s%n", r.index, r.id, r.signature);
-            }
-        }
-    }
-
-    // --- Extract all rules with id + index + signature ---
-    private static List<RuleInfo> extractRules(String filePath) throws Exception {
-        DocumentBuilderFactory dbFactory = DocumentBuilderFactory.newInstance();
-        dbFactory.setNamespaceAware(true);
-        DocumentBuilder dBuilder = dbFactory.newDocumentBuilder();
-        Document doc = dBuilder.parse(new File(filePath));
-        doc.getDocumentElement().normalize();
-
-        List<RuleInfo> rules = new ArrayList<>();
-        NodeList ruleNodes = doc.getElementsByTagNameNS("*", "rule");
-
-        for (int i = 0; i < ruleNodes.getLength(); i++) {
-            Element rule = (Element) ruleNodes.item(i);
-            String id = rule.getAttribute("id");
-            if (id == null || id.isBlank()) {
-                id = "Rule-" + (i + 1);
-            }
-
-            NodeList inputEntries = rule.getElementsByTagNameNS("*", "inputEntry");
-            List<String> inputs = new ArrayList<>();
-            for (int j = 0; j < inputEntries.getLength(); j++) {
-                inputs.add(extractText((Element) inputEntries.item(j)));
-            }
-
-            NodeList outputEntries = rule.getElementsByTagNameNS("*", "outputEntry");
-            List<String> outputs = new ArrayList<>();
-            for (int j = 0; j < outputEntries.getLength(); j++) {
-                outputs.add(extractText((Element) outputEntries.item(j)));
-            }
-
-            String signature = String.join(" | ", inputs) + " => " + String.join(" | ", outputs);
-            signature = signature.replaceAll("\\s+", " ").trim();
-
-            rules.add(new RuleInfo(id, i + 1, signature));
-        }
-
-        return rules;
-    }
-
-    private static String extractText(Element element) {
-        NodeList texts = element.getElementsByTagNameNS("*", "text");
-        if (texts.getLength() > 0) {
-            return texts.item(0).getTextContent().trim();
-        }
-        return "";
-    }
+  @Bean
+  ApplicationRunner check(ZeebeClient client) {
+    return args -> {
+      System.out.println("Checking Zeebe connectivity...");
+      var topology = client.newTopologyRequest().send().join();
+      System.out.println("CONNECTED ✅ Topology: " + topology);
+    };
+  }
 }
